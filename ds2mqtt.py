@@ -6,46 +6,51 @@ https://learn.adafruit.com/adafruits-raspberry-pi-lesson-11-ds18b20-temperature-
 """
 __author__ = "Daniel Casner <www.danielcasner.org>"
 
-
+import sys
 import os
-import glob
 import time
+import json
 import argparse
- 
-os.system('modprobe w1-gpio')
-os.system('modprobe w1-therm')
- 
-base_dir = '/sys/bus/w1/devices/'
-device_folder = glob.glob(base_dir + '28*')[0]
-device_file = device_folder + '/w1_slave'
- 
-def read_temp_raw():
-    f = open(device_file, 'r')
-    lines = f.readlines()
-    f.close()
-    return lines
- 
-def read_temp():
-    lines = read_temp_raw()
-    while lines[0].strip()[-3:] != 'YES':
-        time.sleep(0.2)
-        lines = read_temp_raw()
-    equals_pos = lines[1].find('t=')
-    if equals_pos != -1:
-        temp_string = lines[1][equals_pos+2:]
-        temp_c = float(temp_string) / 1000.0
-        temp_f = temp_c * 9.0 / 5.0 + 32.0
-        return temp_c, temp_f
 
+class Sensor(object):
+    "Class wrapper around 1 wire temperature sensor"
 
+    def __init__(self, device):
+        self.device_file = device
+
+    def read_temp_raw(self):
+        f = open(device_file, 'r')
+        lines = f.readlines()
+        f.close()
+        return lines
+
+    def read_temp(self):
+        lines = self.read_temp_raw()
+        while lines[0].strip()[-3:] != 'YES':
+            time.sleep(0.2)
+            lines = read_temp_raw()
+        equals_pos = lines[1].find('t=')
+        if equals_pos != -1:
+            temp_string = lines[1][equals_pos+2:]
+            temp_c = float(temp_string) / 1000.0
+            temp_f = temp_c * 9.0 / 5.0 + 32.0
+            temp_k = temp_c + 273.150
+            return temp_c, temp_f, temp_k
+
+def runService(sensor, client, topic, unit, interval):
+    "Runs the sensor MQTT broadcast service"
+    while True:
+        sample = sensor.read_temp()
+        client.publish(topic, json.dumps(sample[uint]), qos=0, retain=True)
+        time.sleep(interval)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("pin", type=int, help="The GPIO pin connected to the sensor's data pin")
-    parser.add_argument("topic", type=str, help="The topic stem, data will be broadcast as topic/temperature and topic/humidity")
+    parser.add_argument("device", type=str, help="1 wire device to read")
+    parser.add_argument("topic", type=str, help="The topic to publish temperature data on")
+    parser.add_argument('-u', "--unit", choices="CFK", default='C', help="Unit to publish temperature in")
+    parser.add_argument('-d', "--driver", action="store_true", help="Load 1 wire kernel drivers. Requires the script to be run as root.")
     parser.add_argument('-i', "--interval", type=int, default=30, help="Number of seconds between sensor samples")
-    parser.add_argument('-r', "--power", type=int, help="Optional GPIO pin controlling sensor power, useful for resetting the sensor")
-    parser.add_argument('-l', "--LED", type=int, help="Optional GPIO pin to blink an LED every time the sensor is sampled")
     parser.add_argument("-c", "--clientID", type=str, default="", help="MQTT client ID for the counter node")
     parser.add_argument("-b", "--brokerHost", type=str, default="localhost", help="MQTT Broker hostname or IP address")
     parser.add_argument('-p', "--brokerPort", type=int, help="MQTT Broker port")
@@ -58,13 +63,28 @@ if __name__ == "__main__":
     if args.brokerPort: brokerConnect.append(args.brokerPort)
     if args.brokerKeepAlive: brokerConnect.append(args.brokerKeepAlive)
     if args.bind: brokerConnect.append(args.bind)
-    
+
+    if args.driver:
+        os.system('modprobe w1-gpio')
+        os.system('modprobe w1-therm')
+
+    s = Sensor(args.device)
+
     c = mqtt.Client(args.clientID, not args.clientID)
-    
+
     c.loop_start()
-    
+
     c.connect(*brokerConnect)
-    
-    runService(s, c, args.topic, args.interval)
-    
+
+    if args.unit == 'C':
+        unit_index = 0
+    elif args.unit == 'F':
+        unit_index = 1
+    elif args.unit == 'K':
+        unit_index = 2
+    else:
+        sys.exit("Unsupported unit selection: {}".format(args.unit))
+
+    runService(s, c, args.topic, unit_index, args.interval)
+
     c.loop_stop()
